@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Derive macro that generates a State struct and a reconstitute constructor for hydrating aggregates from persistent state"
 license = "MIT"
+repository = "https://github.com/The127/reconstitute"
 
 [lib]
 proc-macro = true
