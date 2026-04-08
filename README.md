@@ -1,27 +1,24 @@
 # reconstitute
 
-Derive macro that generates a `State` struct and a `reconstitute` constructor for hydrating DDD aggregates from persistent storage.
+Derive macro for hydrating DDD aggregates from storage without punching holes in encapsulation.
 
-## Motivation
+## The problem
 
-In Domain-Driven Design, aggregate constructors are domain operations — they enforce invariants and emit domain events. Hydrating an aggregate from a database row is a different concern: no events should fire, no invariants need re-validating, and the aggregate's internal fields must be set directly from the stored values.
+Aggregate constructors are domain operations — they validate invariants and emit events. Loading an aggregate from a database row is not a domain operation: nothing should fire, nothing needs re-validating, and you need to set fields directly from stored values.
 
-The naive solution is to expose a `pub` constructor (or worse, `pub` fields) just to satisfy the persistence layer. That breaks encapsulation: any caller can now bypass domain logic.
+The usual workarounds are bad. A `pub` constructor lets any caller bypass domain logic. Public fields are worse. A `From<Row>` impl either lives inside the domain crate (wrong layer) or requires the domain crate to know about your persistence types (worse).
 
-`reconstitute` solves this by generating:
+## What this does
 
-1. A companion `{TypeName}State` struct with all the same fields declared `pub` — safe to construct in your repository or read model layer.
-2. A `{TypeName}::reconstitute(state: {TypeName}State) -> Self` associated function that moves the state into the aggregate, calling `Default::default()` for any fields explicitly excluded from the state struct.
+Derive `Reconstitute` on a named struct and you get two things:
 
-The aggregate's own fields stay private. The generated `reconstitute` function lives inside `impl {TypeName}`, so it sees the private fields without exposing them to the outside world.
+**A `{TypeName}State` struct** with the same fields, all `pub`. You construct this in your repository from whatever the database gives you.
 
-## Features
+**A `{TypeName}::reconstitute(state: {TypeName}State) -> Self` associated function** that moves the state into the aggregate. It's generated inside `impl {TypeName}`, so it can see private fields without exposing them.
 
-- Generates a `{TypeName}State` struct with all non-ignored fields exposed as `pub`
-- Generates a `{TypeName}::reconstitute(state)` constructor that populates the aggregate from state
-- `#[reconstitute_ignore]` attribute excludes fields from `State` and fills them with `Default::default()` at reconstitution time — ideal for in-memory caches, event queues, and other transient fields
-- Clear compile errors for unsupported shapes (enums, tuple structs, unit structs, unions)
-- Zero runtime cost — pure code generation, no traits to implement, no reflection
+The aggregate's own fields stay private. The generated function is the only way in.
+
+Fields you don't want persisted — pending event queues, lazy caches — get `#[reconstitute_ignore]`. They're excluded from `State` and filled with `Default::default()` at reconstitution time.
 
 ## Installation
 
@@ -32,46 +29,6 @@ reconstitute = "0.1"
 
 ## Usage
 
-### Basic example
-
-```rust
-use reconstitute::Reconstitute;
-
-#[derive(Reconstitute)]
-pub struct Order {
-    id: OrderId,
-    customer_id: CustomerId,
-    status: OrderStatus,
-    total_cents: i64,
-}
-```
-
-The macro generates:
-
-```rust
-pub struct OrderState {
-    pub id: OrderId,
-    pub customer_id: CustomerId,
-    pub status: OrderStatus,
-    pub total_cents: i64,
-}
-
-impl Order {
-    pub fn reconstitute(state: OrderState) -> Self {
-        Self {
-            id: state.id,
-            customer_id: state.customer_id,
-            status: state.status,
-            total_cents: state.total_cents,
-        }
-    }
-}
-```
-
-### Ignoring transient fields
-
-Fields annotated with `#[reconstitute_ignore]` are excluded from `State` and filled with `Default::default()` when reconstituting. This is the right tool for pending domain event queues, lazy-computed caches, and anything else that has no persistent representation.
-
 ```rust
 use reconstitute::Reconstitute;
 
@@ -82,18 +39,15 @@ pub struct Order {
     status: OrderStatus,
     total_cents: i64,
 
-    /// Domain events accumulated during the current unit of work.
-    /// Not persisted — reset to an empty Vec on hydration.
     #[reconstitute_ignore]
     pending_events: Vec<DomainEvent>,
 
-    /// Cached line-item count, recomputed on demand.
     #[reconstitute_ignore]
     line_item_cache: Option<Vec<LineItem>>,
 }
 ```
 
-The macro generates:
+This generates:
 
 ```rust
 pub struct OrderState {
@@ -111,24 +65,16 @@ impl Order {
             customer_id: state.customer_id,
             status: state.status,
             total_cents: state.total_cents,
-            pending_events: Default::default(),   // Vec::new()
-            line_item_cache: Default::default(),  // None
+            pending_events: Default::default(),
+            line_item_cache: Default::default(),
         }
     }
 }
 ```
 
-### Using reconstitute in a repository
+In a repository:
 
 ```rust
-// In your infrastructure layer — OrderRow maps directly to a DB query result.
-struct OrderRow {
-    id: Uuid,
-    customer_id: Uuid,
-    status: String,
-    total_cents: i64,
-}
-
 impl OrderRepository {
     pub async fn find_by_id(&self, id: OrderId) -> Result<Option<Order>, RepoError> {
         let row: Option<OrderRow> = sqlx::query_as!(
@@ -151,19 +97,11 @@ impl OrderRepository {
 }
 ```
 
-## Design notes
+## Notes
 
-### Why a separate State struct?
+`#[reconstitute_ignore]` fields must implement `Default`. The generated `State` struct inherits the visibility of the annotated struct. Enums, tuple structs, unit structs, and unions are not supported and produce a clear compile error.
 
-The aggregate's fields are private — enforcing that all mutations go through domain methods. A plain `pub` constructor would widen that surface permanently. `State` is the controlled hole: it lives in the infrastructure layer alongside the query that populates it, and it cannot be confused with a domain operation because it has no behaviour.
-
-### How `#[reconstitute_ignore]` works
-
-The macro iterates over the struct's fields and checks each one for a `reconstitute_ignore` attribute. Matching fields are simply omitted from the generated `State` struct definition. In the `reconstitute` body they appear as `field_name: Default::default()`, so the aggregate is always fully initialized without any `Option` wrapping or `unsafe` memory tricks. The ignored field's type must implement `Default`.
-
-### Visibility
-
-The generated `State` struct inherits the visibility of the annotated struct (`pub`, `pub(crate)`, etc.). This ensures it is accessible wherever the aggregate itself is accessible.
+Zero runtime cost — it's pure code generation.
 
 ## License
 
